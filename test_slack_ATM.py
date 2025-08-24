@@ -81,7 +81,7 @@ def setup_api_helper(request, pytestconfig):
         allure.attach(json.dumps(request.cls.api_helper.config, indent=2), "API Config Loaded",
                       allure.attachment_type.JSON)
 
-        request.cls.env = pytestconfig.getoption("TEST_ENV")
+        request.cls.env = pytestconfig.getoption("--TEST_ENV")
         allure.attach(f"Environment: {request.cls.env}", "Environment", allure.attachment_type.TEXT)
 
         # Get company details and credentials from individual Jenkins parameters
