@@ -11,7 +11,7 @@ This module contains positive test cases for Slack integration operations includ
 - Allure reporting integration
 
 Execute command:
-pytest AI_TeamMates/tests/atm_api_tests/test_slack_ATM.py --URL=https://workspan-staging-2.qa.workspan.app --USER=admin@workspan.com --PASSWORD=restingpoint -m AITeamMates_Slack_Integration --TEST_ENV=staging -v -rA --alluredir=reports --disable-warnings
+pytest AI_TeamMates/tests/atm_api_tests --URL=https://workspan-staging-2.qa.workspan.app --USER=admin@workspan.com --PASSWORD=restingpoint --COMPANY_ID=123 --WORK_EMAIL=admin@workspan.com --WORK_PASSWORD=restingpoint --COOKIES_DATA='[{"name":"cookie1","value":"value1","domain":".slack.com"}]' -m AITeamMates_Slack_Integration --TEST_ENV=staging -v -rA --alluredir=reports --disable-warnings
 
 Test Classes:
 - TestSlackIntegrationATM: Slack integration positive functionality testing
@@ -26,6 +26,7 @@ import requests
 import uuid
 import random
 from urllib.parse import urlparse, parse_qs
+
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
@@ -34,6 +35,7 @@ try:
     from selenium.webdriver.support.wait import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
@@ -50,13 +52,8 @@ logger = logging.getLogger(__name__)
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Load master json safely
-try:
-    master_json = read_json(os.getcwd() + "/AI_TeamMates/testdata/master.json")
-    logger.info("Master JSON loaded successfully")
-except (FileNotFoundError, json.JSONDecodeError) as e:
-    logger.error(f"Failed to load master.json: {str(e)}")
-    master_json = {}
+# Master JSON removed - users will be provided via Jenkins parameter
+master_json = {}
 
 
 @pytest.fixture(scope="class")
@@ -81,41 +78,73 @@ def setup_api_helper(request, pytestconfig):
             key: f"{request.cls.base_url}{value}"
             for key, value in request.cls.api_helper.config.items()
         }
-        allure.attach(json.dumps(request.cls.api_helper.config, indent=2), "API Config Loaded", allure.attachment_type.JSON)
+        allure.attach(json.dumps(request.cls.api_helper.config, indent=2), "API Config Loaded",
+                      allure.attachment_type.JSON)
 
         request.cls.env = pytestconfig.getoption("TEST_ENV")
         allure.attach(f"Environment: {request.cls.env}", "Environment", allure.attachment_type.TEXT)
 
-        # Safely get company details, handling potential key errors
+        # Get company details and credentials from individual Jenkins parameters
         try:
-            master_json_path = os.getcwd() + master_json.get(f"{request.cls.env}_users", "")
-            company_data = read_json(master_json_path)
-            if not company_data or not isinstance(company_data, dict):
-                raise KeyError("Invalid company data format")
-            if "data" not in company_data or not company_data["data"] or not isinstance(company_data["data"], list):
-                raise KeyError("Invalid company data structure - missing or empty 'data' field")
+            # Get company ID from Jenkins parameter
+            company_id = pytestconfig.getoption("--COMPANY_ID")
+            if not company_id:
+                pytest.fail("COMPANY_ID parameter is required from Jenkins")
+            
+            # Get work email from Jenkins parameter
+            work_email = pytestconfig.getoption("--WORK_EMAIL")
+            if not work_email:
+                pytest.fail("WORK_EMAIL parameter is required from Jenkins")
+            
+            # Get work password from Jenkins parameter
+            work_password = pytestconfig.getoption("--WORK_PASSWORD")
+            if not work_password:
+                pytest.fail("WORK_PASSWORD parameter is required from Jenkins")
+            
+            # Create company details and credentials structure
+            request.cls.company_details = {"company_id": company_id}
+            request.cls.credentials = {
+                "work_email": work_email,
+                "password": work_password
+            }
 
-            request.cls.company_details = company_data["data"][0]
-
-            if not isinstance(request.cls.company_details, dict):
-                raise KeyError("Invalid company details format")
-            if "users" not in request.cls.company_details or not request.cls.company_details["users"]:
-                raise KeyError("No users found in company details")
-            if not isinstance(request.cls.company_details["users"], list):
-                raise KeyError("Invalid users format in company details")
-            request.cls.credentials = request.cls.company_details["users"][0]
-
-            allure.attach(json.dumps(request.cls.company_details, indent=2), "Company Details Loaded",
-                          allure.attachment_type.JSON)
-            allure.attach(json.dumps(request.cls.credentials, indent=2), "Credentials Loaded",
-                          allure.attachment_type.JSON)
-        except (FileNotFoundError, json.JSONDecodeError, KeyError, IndexError) as e:
+            allure.attach(f"Company ID: {company_id}", "Company Details Loaded", allure.attachment_type.TEXT)
+            allure.attach(f"Work Email: {work_email}", "Credentials Loaded", allure.attachment_type.TEXT)
+            allure.attach("Password loaded", "Password Status", allure.attachment_type.TEXT)
+        except Exception as e:
             error_msg = f"Failed to load company details or credentials: {str(e)}"
             logger.error(error_msg)
             allure.attach(error_msg, "Setup Error", allure.attachment_type.TEXT)
             pytest.fail(error_msg)
 
         request.cls.master_file = master_json
+        
+        # Get cookies data from Jenkins parameter (securely)
+        cookies_json_str = pytestconfig.getoption("--COOKIES_DATA")
+        if cookies_json_str:
+            try:
+                # Parse cookies data but don't store sensitive info in logs
+                cookies_data = json.loads(cookies_json_str)
+                request.cls.cookies_data = cookies_data
+                
+                # Log only non-sensitive information
+                cookie_count = len(cookies_data) if isinstance(cookies_data, list) else 0
+                logger.info(f"Cookies data loaded from Jenkins parameter ({cookie_count} cookies)")
+                allure.attach(f"Cookies data loaded successfully ({cookie_count} cookies)", "Cookies Status", allure.attachment_type.TEXT)
+                
+                # Clear sensitive data from memory after logging
+                del cookies_json_str
+                
+            except json.JSONDecodeError as e:
+                error_msg = "Failed to parse COOKIES_DATA parameter"
+                logger.error(error_msg)
+                allure.attach(error_msg, "Cookies Error", allure.attachment_type.TEXT)
+                pytest.fail(error_msg)
+        else:
+            request.cls.cookies_data = None
+            logger.info("No cookies data provided via Jenkins parameter")
+            allure.attach("No cookies data provided", "Cookies Status", allure.attachment_type.TEXT)
+            
     except Exception as e:
         error_msg = f"Error in setup_api_helper: {str(e)}"
         logger.error(error_msg)
@@ -143,22 +172,37 @@ class TestSlackIntegrationATM:
         cls.slack_team_id = None
         cls.sent_message_text = None
         cls.driver = None
-        cls.cookies_file = os.getcwd() + "/AI_TeamMates/testdata/app.slack.com.cookies.json"
-        # Load OAuth URL dynamically from slack_creds.json
-        try:
-            slack_creds_path = os.getcwd() + "/AI_TeamMates/testdata/slack_creds.json"
-            with open(slack_creds_path, 'r') as f:
-                slack_creds_data = json.load(f)
-            
-            oauth_url_template = slack_creds_data.get('oauth_url_template')
-            client_id = slack_creds_data.get('base_credentials', {}).get('client_id')
-            
-            if oauth_url_template and client_id:
-                cls.oauth_url = oauth_url_template.replace('<client_id>', client_id)
-            else:
-                pytest.fail("oauth_url_template or client_id not found in slack_creds.json")
-        except Exception as e:
-            pytest.fail(f"Failed to load OAuth URL from slack_creds.json: {str(e)}")
+        # Cookies will be provided via Jenkins parameter
+        cls.cookies_data = None
+        
+    @classmethod
+    def teardown_class(cls):
+        """Cleanup class-level variables and sensitive data"""
+        # Clear sensitive cookies data
+        if hasattr(cls, 'cookies_data'):
+            cls.cookies_data = None
+        logger.info("Cookies data cleared from memory")
+        
+        # Hardcoded slack_creds.json data
+        cls.slack_creds_data = {
+            "oauth_url_template": "https://slack.com/oauth/v2/authorize?client_id=<client_id>&scope=channels:read,chat:write,team:read&user_scope=",
+            "base_credentials": {
+                "client_id": "3028352990.9190625703366",
+                "client_secret": "514f1448e898df99297dbee647021014",
+                "bot_name": "Slack Test 191 ATM"
+            },
+            "slack_channel_name": "slack-atm-automation",
+            "slack_message_template": "Hello QA Team, The API is now working from the Slack feature. Please validate the pre-populated message from SFDC manually. The message was sent on {date & time}"
+        }
+        
+        # Set OAuth URL
+        oauth_url_template = cls.slack_creds_data.get('oauth_url_template')
+        client_id = cls.slack_creds_data.get('base_credentials', {}).get('client_id')
+        
+        if oauth_url_template and client_id:
+            cls.oauth_url = oauth_url_template.replace('<client_id>', client_id)
+        else:
+            pytest.fail("oauth_url_template or client_id not found in hardcoded slack_creds data")
 
     def _extract_error_message(self, response):
         """Helper method to safely extract error messages from API responses"""
@@ -201,15 +245,8 @@ class TestSlackIntegrationATM:
         return None
 
     def _load_slack_test_data(self):
-        """Load and return Slack test data from consolidated JSON file"""
-        test_data_file_path = os.getcwd() + "/AI_TeamMates/testdata/slack_creds.json"
-        if not os.path.exists(test_data_file_path):
-            pytest.fail(f"Slack credentials file not found: {test_data_file_path}")
-
-        with open(test_data_file_path, 'r') as f:
-            test_data = json.load(f)
-
-        return test_data
+        """Load and return Slack test data from hardcoded data"""
+        return self.slack_creds_data
 
     def _api_call_with_retry(self, api_method, *args, **kwargs):
         """
@@ -287,21 +324,25 @@ class TestSlackIntegrationATM:
         options.add_argument("--start-maximized")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        
+
         self.driver = webdriver.Chrome(service=Service(), options=options)
         return self.driver
 
     def load_cookies(self, navigate_url: str = None):
-        """Load cookies from file and apply to driver. Optionally navigate to a URL before setting cookies."""
+        """Load cookies from Jenkins parameter and apply to driver. Optionally navigate to a URL before setting cookies."""
         try:
-            with open(self.cookies_file, "r") as f:
-                cookies = json.load(f)
+            if not self.cookies_data:
+                pytest.fail("Cookies data not provided via Jenkins parameter")
             
+            cookies = self.cookies_data
+            # Log only the count of cookies for security, not the actual data
+            logger.info(f"Loading {len(cookies)} cookies from Jenkins parameter")
+
             # Navigate to domain first to set cookies
             target_url = navigate_url or "https://workspan.slack.com"
             self.driver.get(target_url)
             time.sleep(2)
-            
+
             # Add each cookie
             for cookie in cookies:
                 cookie_dict = {
@@ -326,7 +367,7 @@ class TestSlackIntegrationATM:
                 except Exception:
                     # Silently skip cookies that can't be added
                     continue
-            
+
             return True
         except Exception as e:
             return False
@@ -384,7 +425,8 @@ class TestSlackIntegrationATM:
                     TestSlackIntegrationATM.token
                 )
 
-                allure.attach(json.dumps(response, indent=2), "Company Connection Response", allure.attachment_type.JSON)
+                allure.attach(json.dumps(response, indent=2), "Company Connection Response",
+                              allure.attachment_type.JSON)
 
                 if response.get('status_code') != 200:
                     error_msg = self._extract_error_message(response)
@@ -395,8 +437,9 @@ class TestSlackIntegrationATM:
                 slack_connections = [conn for conn in connections_data if conn.get('app') == 'slack']
 
                 if slack_connections:
-                    allure.attach(f"Found {len(slack_connections)} existing Slack connection(s)", "Existing Connections", allure.attachment_type.TEXT)
-                    
+                    allure.attach(f"Found {len(slack_connections)} existing Slack connection(s)",
+                                  "Existing Connections", allure.attachment_type.TEXT)
+
                     # Delete each existing Slack connection
                     for connection in slack_connections:
                         connection_id = connection.get('id')
@@ -407,15 +450,19 @@ class TestSlackIntegrationATM:
                                     TestSlackIntegrationATM.token,
                                     str(connection_id)
                                 )
-                                
-                                allure.attach(json.dumps(delete_response, indent=2), f"Delete Response for ID {connection_id}", allure.attachment_type.JSON)
-                                
+
+                                allure.attach(json.dumps(delete_response, indent=2),
+                                              f"Delete Response for ID {connection_id}", allure.attachment_type.JSON)
+
                                 if delete_response.get('status_code') == 200:
-                                    assert delete_response.get('message') == "Slack connection deleted successfully", "Unexpected delete response message"
-                                    allure.attach(f"Successfully deleted connection ID: {connection_id}", "Delete Status", allure.attachment_type.TEXT)
+                                    assert delete_response.get(
+                                        'message') == "Slack connection deleted successfully", "Unexpected delete response message"
+                                    allure.attach(f"Successfully deleted connection ID: {connection_id}",
+                                                  "Delete Status", allure.attachment_type.TEXT)
                                 else:
                                     error_msg = self._extract_error_message(delete_response)
-                                    allure.attach(f"Failed to delete connection ID {connection_id}: {error_msg}", "Delete Error", allure.attachment_type.TEXT)
+                                    allure.attach(f"Failed to delete connection ID {connection_id}: {error_msg}",
+                                                  "Delete Error", allure.attachment_type.TEXT)
                 else:
                     pytest.skip("No existing Slack connections found. Skipping deletion step.")
 
@@ -433,7 +480,8 @@ class TestSlackIntegrationATM:
             test_data = self._load_slack_test_data()
             credentials_payload = test_data['base_credentials']
 
-            allure.attach(json.dumps(credentials_payload, indent=2), "Slack Credentials Payload", allure.attachment_type.JSON)
+            allure.attach(json.dumps(credentials_payload, indent=2), "Slack Credentials Payload",
+                          allure.attachment_type.JSON)
 
             # Save credentials
             response = self._api_call_with_retry(
@@ -453,7 +501,8 @@ class TestSlackIntegrationATM:
 
             assert response['message'] == "Slack credentials saved successfully", "Unexpected response message"
 
-            allure.attach("Slack credentials saved successfully", "Save Credentials Status", allure.attachment_type.TEXT)
+            allure.attach("Slack credentials saved successfully", "Save Credentials Status",
+                          allure.attachment_type.TEXT)
 
         except Exception as e:
             pytest.fail(f"Save Slack credentials positive test failed: {str(e)}")
@@ -483,9 +532,11 @@ class TestSlackIntegrationATM:
             # Extract connection_id if available
             if 'connection_id' in response:
                 TestSlackIntegrationATM.connection_id = response['connection_id']
-                allure.attach(f"Connection ID: {TestSlackIntegrationATM.connection_id}", "Connection ID", allure.attachment_type.TEXT)
+                allure.attach(f"Connection ID: {TestSlackIntegrationATM.connection_id}", "Connection ID",
+                              allure.attachment_type.TEXT)
 
-            allure.attach("Company connection retrieved successfully", "Company Connection Status", allure.attachment_type.TEXT)
+            allure.attach("Company connection retrieved successfully", "Company Connection Status",
+                          allure.attachment_type.TEXT)
 
         except Exception as e:
             pytest.fail(f"Get company connection test failed: {str(e)}")
@@ -511,7 +562,7 @@ class TestSlackIntegrationATM:
             with allure.step("Handle OAuth approval"):
                 # Wait for and click the Allow button - try multiple selectors
                 wait = WebDriverWait(self.driver, 60)
-                
+
                 # Try different selectors for the Allow button
                 allow_button = None
                 selectors = [
@@ -524,18 +575,19 @@ class TestSlackIntegrationATM:
                     'button:contains("Authorize")',
                     'button[aria-label="Authorize"]'
                 ]
-                
+
                 for selector in selectors:
                     try:
                         if "contains" in selector:
                             # Handle text-based selectors
-                            allow_button = wait.until(EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{selector.split('contains(')[1].split(')')[0]}')]")))
+                            allow_button = wait.until(EC.element_to_be_clickable((By.XPATH,
+                                                                                  f"//button[contains(text(), '{selector.split('contains(')[1].split(')')[0]}')]")))
                         else:
                             allow_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
                         break
                     except TimeoutException:
                         continue
-                
+
                 if allow_button:
                     allow_button.click()
                     allure.attach("Allow button clicked successfully", "OAuth Approval", allure.attachment_type.TEXT)
@@ -550,7 +602,7 @@ class TestSlackIntegrationATM:
                 # Wait for redirect - try multiple approaches
                 final_url = None
                 authorization_code = None
-                
+
                 try:
                     # First try: Wait for URL with code parameter
                     wait.until(EC.url_contains("code="))
@@ -559,21 +611,24 @@ class TestSlackIntegrationATM:
                     # Quit driver immediately after getting the final URL
                     if self.driver:
                         self.driver.quit()
-                        allure.attach("Driver quit immediately after getting final URL", "Driver Status", allure.attachment_type.TEXT)
+                        allure.attach("Driver quit immediately after getting final URL", "Driver Status",
+                                      allure.attachment_type.TEXT)
 
                     authorization_code = self.extract_code_from_url(final_url)
                 except TimeoutException:
                     # Third try: Just wait a bit and check current URL
                     final_url = self.driver.current_url
-                    allure.attach(f"Final URL (timeout): {final_url}", "OAuth Redirect URL", allure.attachment_type.TEXT)
+                    allure.attach(f"Final URL (timeout): {final_url}", "OAuth Redirect URL",
+                                  allure.attachment_type.TEXT)
                     # Quit driver immediately after getting the final URL
                     if self.driver:
                         self.driver.quit()
-                        allure.attach("Driver quit immediately after getting final URL", "Driver Status", allure.attachment_type.TEXT)
-                    
+                        allure.attach("Driver quit immediately after getting final URL", "Driver Status",
+                                      allure.attachment_type.TEXT)
+
                     # Try normal extraction first
                     authorization_code = self.extract_code_from_url(final_url)
-                    
+
                     # If not found, try to extract from redirectUrl param (for cases like /login?redirectUrl=...)
                     if not authorization_code:
                         parsed = urlparse(final_url)
@@ -591,13 +646,14 @@ class TestSlackIntegrationATM:
                                     # Sometimes code is urlencoded, decode again
                                     code_candidate = unquote(code_candidate)
                                     authorization_code = code_candidate
-                
+
                 # Store the authorization code
                 TestSlackIntegrationATM.authorization_code = authorization_code
-                
+
                 if TestSlackIntegrationATM.authorization_code:
-                    allure.attach(f"Authorization code extracted: {TestSlackIntegrationATM.authorization_code[:10]}...", "Authorization Code", allure.attachment_type.TEXT)
-                
+                    allure.attach(f"Authorization code extracted: {TestSlackIntegrationATM.authorization_code[:10]}...",
+                                  "Authorization Code", allure.attachment_type.TEXT)
+
         except TimeoutException:
             pytest.fail("Timeout waiting for Allow button or redirect")
         except Exception as e:
@@ -615,8 +671,10 @@ class TestSlackIntegrationATM:
                 pytest.fail("Auth token is missing. Login first.")
 
             if not TestSlackIntegrationATM.authorization_code:
-                allure.attach("Authorization code not available from OAuth flow", "Callback Status", allure.attachment_type.TEXT)
-                allure.attach("This test requires a successful OAuth flow to get the authorization code", "Test Note", allure.attachment_type.TEXT)
+                allure.attach("Authorization code not available from OAuth flow", "Callback Status",
+                              allure.attachment_type.TEXT)
+                allure.attach("This test requires a successful OAuth flow to get the authorization code", "Test Note",
+                              allure.attachment_type.TEXT)
                 # Skip the test instead of failing
                 pytest.skip("Authorization code is missing. OAuth flow may not have completed successfully.")
 
@@ -636,7 +694,8 @@ class TestSlackIntegrationATM:
                 error_msg = self._extract_error_message(response)
                 pytest.fail(f"Failed to complete Slack callback: {error_msg}")
 
-            assert response.get('message') == "Slack app authorized successfully", "Slack app authorized not successfully"
+            assert response.get(
+                'message') == "Slack app authorized successfully", "Slack app authorized not successfully"
 
             allure.attach("Slack callback completed successfully", "Callback Status", allure.attachment_type.TEXT)
 
@@ -669,13 +728,16 @@ class TestSlackIntegrationATM:
             data_list = response.get('data', [])
             assert data_list, "No data found in Slack connection response"
             slack_connection = data_list[0]
-            assert slack_connection.get('status') == 'active', f"Slack connection status is not active: {slack_connection.get('status')}"
+            assert slack_connection.get(
+                'status') == 'active', f"Slack connection status is not active: {slack_connection.get('status')}"
 
             # Store connectionContext for future use in self
             TestSlackIntegrationATM.slack_connection_context = slack_connection.get('connectionContext', {})
-            allure.attach(json.dumps(self.slack_connection_context, indent=2), "Slack Connection Context", allure.attachment_type.JSON)
+            allure.attach(json.dumps(self.slack_connection_context, indent=2), "Slack Connection Context",
+                          allure.attachment_type.JSON)
 
-            allure.attach("Slack connection validated successfully", "Validate Connection Status", allure.attachment_type.TEXT)
+            allure.attach("Slack connection validated successfully", "Validate Connection Status",
+                          allure.attachment_type.TEXT)
 
         except Exception as e:
             pytest.fail(f"Validate Slack connection test failed: {str(e)}")
@@ -687,22 +749,24 @@ class TestSlackIntegrationATM:
             if not TestSlackIntegrationATM.token:
                 pytest.fail("Auth token is missing. Login first.")
 
-            if not hasattr(self, "master_file") or not self.master_file:
-                pytest.fail("Master file not loaded properly in setup")
-
-            test_data_path = os.getcwd() + self.master_file.get('add_action', '')
-            test_data = read_json(test_data_path)
-
-            if not test_data or not isinstance(test_data, dict):
-                pytest.fail(f"Invalid test data format in {test_data_path}")
-            if "create_teammate_payload" not in test_data:
-                pytest.fail(f"'create_teammate_payload' not found in test data from {test_data_path}")
-
+            # Hardcoded test data for teammate creation
+            test_data = {
+                "create_teammate_payload": {
+                    "name": "Test Teammate {$random}",
+                    "description": "Test description {$random}",
+                    "partner_company_name": "Test Company {$random}",
+                    "partner_company_file_name": "test_logo_{$filename_type}",
+                    "status": "DRAFT"
+                }
+            }
+            
             teammate_payload_source = test_data.get("create_teammate_payload")
             if not isinstance(teammate_payload_source, dict):
                 pytest.fail("create_teammate_payload is not a valid dictionary")
             teammate_payload = teammate_payload_source.copy()
-            partner_logo_files = self.master_file.get('partner_valid_logo_document', [])
+            
+            # Hardcoded partner logo files
+            partner_logo_files = ["AI_TeamMates/testdata/partner_company_logo/valid_logo.jpg"]
 
             if not partner_logo_files:
                 pytest.fail("No partner logo files found in master file")
@@ -718,10 +782,15 @@ class TestSlackIntegrationATM:
                 if isinstance(teammate_payload[key], str):
                     teammate_payload[key] = teammate_payload[key].replace('{$random}', uuid.uuid4().hex[:5])
                     teammate_payload[key] = teammate_payload[key].replace('{$number}', str(random.randint(1, 20)))
-                    teammate_payload[key] = teammate_payload[key].replace('{$filename_type}', partner_logo_file.split('/')[-1])
+                    teammate_payload[key] = teammate_payload[key].replace('{$filename_type}',
+                                                                          partner_logo_file.split('/')[-1])
 
             allure.attach(json.dumps(teammate_payload, indent=2), "Teammate Payload", allure.attachment_type.JSON)
-            teammate_payload['partner_company_name'] = teammate_payload['partner_company_name'].replace("Test Company", partner_logo_file.split('/')[-1].split('.')[0])
+            teammate_payload['partner_company_name'] = teammate_payload['partner_company_name'].replace("Test Company",
+                                                                                                        partner_logo_file.split(
+                                                                                                            '/')[
+                                                                                                            -1].split(
+                                                                                                            '.')[0])
 
             # Upload partner logo
             logo_upload = self._api_call_with_retry(
@@ -768,7 +837,12 @@ class TestSlackIntegrationATM:
             # Create teammate
             # Step 1: Create plan before teammate creation
             with allure.step("Create Plan for Teammate"):
-                plan_template = self.master_file['plan_template']
+                # Hardcoded plan template
+                plan_template = {
+                    "name": "Test Plan {$random}",
+                    "description": "Test plan description {$random}",
+                    "status": "ACTIVE"
+                }
                 company_id = self.company_details.get('company_id')
                 allure.attach(f"Using company_id: {company_id}", "Company ID", allure.attachment_type.TEXT)
 
@@ -831,7 +905,7 @@ class TestSlackIntegrationATM:
             # Load Slack credentials to get the channel name
             test_data = self._load_slack_test_data()
             target_channel_name = test_data.get('slack_channel_name')
-            
+
             if not target_channel_name:
                 pytest.fail("slack_channel_name not found in slack_creds.json")
 
@@ -862,7 +936,7 @@ class TestSlackIntegrationATM:
             # Find the target channel
             channels = response.get('channels', [])
             target_channel = None
-            
+
             for channel in channels:
                 if channel.get('name') == target_channel_name:
                     target_channel = channel
@@ -870,7 +944,8 @@ class TestSlackIntegrationATM:
 
             if not target_channel:
                 available_channels = [ch.get('name') for ch in channels[:10]]  # Show first 10 channels
-                allure.attach(f"Available channels (first 10): {available_channels}", "Available Channels", allure.attachment_type.TEXT)
+                allure.attach(f"Available channels (first 10): {available_channels}", "Available Channels",
+                              allure.attachment_type.TEXT)
                 pytest.fail(f"Channel '{target_channel_name}' not found in Slack workspace")
 
             # Store channel details for future use
@@ -878,14 +953,16 @@ class TestSlackIntegrationATM:
             TestSlackIntegrationATM.slack_channel_name = target_channel.get('name')
 
             allure.attach(f"Found channel: {target_channel_name}", "Channel Found", allure.attachment_type.TEXT)
-            allure.attach(f"Channel ID: {TestSlackIntegrationATM.slack_channel_id}", "Channel ID", allure.attachment_type.TEXT)
+            allure.attach(f"Channel ID: {TestSlackIntegrationATM.slack_channel_id}", "Channel ID",
+                          allure.attachment_type.TEXT)
             allure.attach(json.dumps(target_channel, indent=2), "Target Channel Details", allure.attachment_type.JSON)
 
             # Validate channel properties
             assert target_channel.get('is_archived') == False, "Channel should not be archived"
             assert int(target_channel.get('num_members', 0)) > 0, "Channel should have members"
 
-            allure.attach("Slack channels fetched and target channel found successfully", "Fetch Channels Status", allure.attachment_type.TEXT)
+            allure.attach("Slack channels fetched and target channel found successfully", "Fetch Channels Status",
+                          allure.attachment_type.TEXT)
 
         except Exception as e:
             pytest.fail(f"Fetch Slack channels test failed: {str(e)}")
@@ -903,7 +980,8 @@ class TestSlackIntegrationATM:
             if not hasattr(TestSlackIntegrationATM, 'slack_channel_id') or not TestSlackIntegrationATM.slack_channel_id:
                 pytest.fail("Slack channel ID not found. Run test_09_fetch_slack_channels first.")
 
-            if not hasattr(TestSlackIntegrationATM, 'slack_channel_name') or not TestSlackIntegrationATM.slack_channel_name:
+            if not hasattr(TestSlackIntegrationATM,
+                           'slack_channel_name') or not TestSlackIntegrationATM.slack_channel_name:
                 pytest.fail("Slack channel name not found. Run test_09_fetch_slack_channels first.")
 
             teammate_id = TestSlackIntegrationATM.teammate.get('id')
@@ -1044,10 +1122,14 @@ class TestSlackIntegrationATM:
                 pytest.fail(f"Failed to send slack message: {error_msg}")
 
             # Validate the send_response using assertions
-            assert send_response.get("status") == "success", f"Expected status 'success', got {send_response.get('status')}"
-            assert send_response.get("message") == "Message sent successfully to Slack", f"Unexpected message: {send_response.get('message')}"
-            assert "message_ts" in send_response and send_response["message_ts"], "Missing or empty 'message_ts' in response"
-            assert send_response.get("channel_id") == channel_id, f"Expected channel_id '{channel_id}', got {send_response.get('channel_id')}"
+            assert send_response.get(
+                "status") == "success", f"Expected status 'success', got {send_response.get('status')}"
+            assert send_response.get(
+                "message") == "Message sent successfully to Slack", f"Unexpected message: {send_response.get('message')}"
+            assert "message_ts" in send_response and send_response[
+                "message_ts"], "Missing or empty 'message_ts' in response"
+            assert send_response.get(
+                "channel_id") == channel_id, f"Expected channel_id '{channel_id}', got {send_response.get('channel_id')}"
 
         except Exception as e:
             pytest.fail(f"Send Slack message test failed: {str(e)}")
@@ -1090,7 +1172,8 @@ class TestSlackIntegrationATM:
 
             wait = WebDriverWait(self.driver, 60)
             message_list = wait.until(EC.presence_of_element_located((By.ID, "message-list")))
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, '#message-list .c-virtual_list__item [data-qa="message_content"]')))
+            wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, '#message-list .c-virtual_list__item [data-qa="message_content"]')))
 
             # Collect messages visible in the list
             messages = []
@@ -1105,14 +1188,17 @@ class TestSlackIntegrationATM:
                 except Exception:
                     continue
 
-            allure.attach(json.dumps(messages, indent=2), "All Slack Messages (Present in DOM)", allure.attachment_type.JSON)
+            allure.attach(json.dumps(messages, indent=2), "All Slack Messages (Present in DOM)",
+                          allure.attachment_type.JSON)
 
             # Validate that our message is present; match by prefix and today's date
             matched = any(expected_message in m for m in messages)
             if matched:
-                allure.attach(f"Found expected message: {expected_message}", "Message Found", allure.attachment_type.TEXT)
+                allure.attach(f"Found expected message: {expected_message}", "Message Found",
+                              allure.attachment_type.TEXT)
             else:
-                allure.attach(f"Expected message not found: {expected_message}", "Message Not Found", allure.attachment_type.TEXT)
+                allure.attach(f"Expected message not found: {expected_message}", "Message Not Found",
+                              allure.attachment_type.TEXT)
                 pytest.fail("Expected Slack message not found in channel")
 
         except Exception as e:
@@ -1188,7 +1274,8 @@ class TestSlackIntegrationATM:
                 f"Expected slack configuration 'False', got {response['has_slack_connection']}"
             )
 
-            allure.attach("Slack configuration validated: has_slack_connection is False", "Validation Status", allure.attachment_type.TEXT)
+            allure.attach("Slack configuration validated: has_slack_connection is False", "Validation Status",
+                          allure.attachment_type.TEXT)
 
         except Exception as e:
             pytest.fail(f"Validate Slack configuration test failed: {str(e)}")
@@ -1216,7 +1303,8 @@ class TestSlackIntegrationATM:
             if not delete_response or not isinstance(delete_response, dict):
                 pytest.fail("Invalid delete teammate response")
 
-            allure.attach(json.dumps(delete_response, indent=2), "Delete Teammate Response", allure.attachment_type.JSON)
+            allure.attach(json.dumps(delete_response, indent=2), "Delete Teammate Response",
+                          allure.attachment_type.JSON)
 
             if delete_response.get('status_code') != 200:
                 error_msg = self._extract_error_message(delete_response)
@@ -1263,7 +1351,8 @@ class TestSlackIntegrationATM:
             if not delete_plan_response or not isinstance(delete_plan_response, dict):
                 pytest.fail("Invalid delete plan response")
 
-            allure.attach(json.dumps(delete_plan_response, indent=2), "Delete Plan Response", allure.attachment_type.JSON)
+            allure.attach(json.dumps(delete_plan_response, indent=2), "Delete Plan Response",
+                          allure.attachment_type.JSON)
 
             if delete_plan_response.get('status_code') != 200:
                 error_msg = self._extract_error_message(delete_plan_response)
